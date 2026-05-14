@@ -20,7 +20,7 @@ class TemporalEngine:
     def should_process_frame(self):
         """
         Dynamic Frame Sampler logic. 
-        Returns True if the frame should be sent to SAM 2 for inference.
+        Returns True if the frame should be sent to SAM 3 for inference.
         """
         self.frame_counter += 1
         
@@ -37,7 +37,7 @@ class TemporalEngine:
 
     def evaluate_tracking_state(self, mask, confidence):
         """
-        Evaluates the result from SAM 2. 
+        Evaluates the result from SAM 3. 
         If confidence drops unexpectedly during Time-Hopping, trigger backtracking.
         """
         if mask is None or confidence < self.confidence_threshold:

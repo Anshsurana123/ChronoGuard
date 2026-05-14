@@ -241,7 +241,7 @@ export default function Dashboard() {
           ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
           ctx.fillRect(x1, y1 - 20, 180, 18);
           ctx.fillStyle = "#00f0ff";
-          ctx.fillText("SAM2 TRACKING", x1 + 4, y1 - 6);
+          ctx.fillText("SAM3 TRACKING", x1 + 4, y1 - 6);
           ctx.fillStyle = confColor;
           ctx.fillText(`${confPct}%`, x1 + 120, y1 - 6);
 
@@ -284,7 +284,7 @@ export default function Dashboard() {
           ctx.shadowBlur = 0;
           ctx.font = "11px monospace";
           ctx.fillStyle = "#ffaa00";
-          ctx.fillText("TRACKING (SAM2 offline)", cx + size + 6, cy - 4);
+          ctx.fillText("TRACKING (SAM3 offline)", cx + size + 6, cy - 4);
           ctx.shadowBlur = 0;
         }
       }
@@ -415,7 +415,7 @@ export default function Dashboard() {
             </div>
 
             <div className="flex items-center justify-between p-3 rounded-lg bg-black/40 border border-border">
-              <span className="flex items-center gap-2 text-sm"><div className={`w-2 h-2 rounded-full ${samConnected ? 'bg-green-500 animate-pulse' : isStreaming ? 'bg-yellow-500' : 'bg-red-500'}`} /> SAM 2 Predictor</span>
+              <span className="flex items-center gap-2 text-sm"><div className={`w-2 h-2 rounded-full ${samConnected ? 'bg-green-500 animate-pulse' : isStreaming ? 'bg-yellow-500' : 'bg-red-500'}`} /> SAM 3 Predictor</span>
               <span className="text-xs font-mono text-muted">{samConnected ? 'TRACKING' : trackingPoint ? 'OFFLINE' : 'IDLE'}</span>
             </div>
           </div>
@@ -460,7 +460,7 @@ export default function Dashboard() {
               </div>
               {trackingPoint && !isTrackingMode && (
                 <span className={`text-[10px] font-mono ${samConnected ? 'text-green-400' : 'text-yellow-400'}`}>
-                  {samConnected ? 'SAM2 LIVE' : 'FALLBACK'}
+                  {samConnected ? 'SAM3 LIVE' : 'FALLBACK'}
                 </span>
               )}
             </button>

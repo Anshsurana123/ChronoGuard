@@ -9,7 +9,7 @@ import numpy as np
 
 class SamClient:
     """
-    Async HTTP client that talks to the SAM 2 inference endpoint
+    Async HTTP client that talks to the SAM 3 inference endpoint
     running on Google Colab (exposed via ngrok).
 
     Returns structured tracking data: mask, bounding box, centroid,
@@ -42,7 +42,7 @@ class SamClient:
 
     async def init_tracking(self, frame, click_x: int, click_y: int) -> dict | None:
         """
-        Initializes the SAM 2 tracking session with the first frame
+        Initializes the SAM 3 tracking session with the first frame
         and click coordinates.
 
         Returns dict with keys: mask, bbox, centroid, confidence
@@ -71,18 +71,18 @@ class SamClient:
                 "confidence": data.get("confidence", 0),
             }
         except Exception as e:
-            print(f"[SamClient] Failed to initialize tracking: {e}")
+            print(f"[SamClient] Failed to initialize SAM 3 tracking: {e}")
             return None
 
     async def update_tracking(self, frame) -> dict | None:
         """
-        Sends a subsequent frame to update the SAM 2 tracking state.
+        Sends a subsequent frame to update the SAM 3 tracking state.
 
         Returns dict with keys: mask, bbox, centroid, confidence
         or None on failure.
         """
         if not self.initialized:
-            print("[SamClient] Warning: not initialized. Call init_tracking first.")
+            print("[SamClient] Warning: SAM 3 not initialized. Call init_tracking first.")
             return None
 
         frame_b64 = self._compress_and_encode(frame)
@@ -105,7 +105,7 @@ class SamClient:
                 "confidence": data.get("confidence", 0),
             }
         except Exception as e:
-            print(f"[SamClient] Failed to update tracking: {e}")
+            print(f"[SamClient] Failed to update SAM 3 tracking: {e}")
             return None
 
     async def reset(self):

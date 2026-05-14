@@ -34,7 +34,7 @@ privacy_filter = PrivacyFilter()
 # ------------------------------------------------------------------
 # Set your Colab ngrok URL here (or via SAM_ENDPOINT env var)
 # ------------------------------------------------------------------
-SAM_ENDPOINT = os.environ.get("SAM_ENDPOINT", "https://ccf4-35-204-223-220.ngrok-free.app")
+SAM_ENDPOINT = os.environ.get("SAM_ENDPOINT", "https://d00f-34-6-88-71.ngrok-free.app")
 sam_client = SamClient(endpoint_url=SAM_ENDPOINT)
 
 temporal_engine = TemporalEngine(time_hop_interval=15)
@@ -45,8 +45,8 @@ alert_system = AlertSystem()
 current_frame = None
 tracking_active = False
 tracking_target = (320, 240)       # Initial click point
-tracking_bbox = None               # [x, y, w, h] from SAM 2
-tracking_centroid = None            # [cx, cy]  from SAM 2
+tracking_bbox = None               # [x, y, w, h] from SAM 3
+tracking_centroid = None            # [cx, cy]  from SAM 3
 tracking_confidence = 0.0
 sam_connected = False               # Whether the Colab endpoint is reachable
 
@@ -85,7 +85,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
                     tracking_confidence = 0.0
 
                     if current_frame is not None:
-                        # Call Colab SAM 2 endpoint
+                        # Call Colab SAM 3 endpoint
                         result = await sam_client.init_tracking(current_frame, click_x, click_y)
                         if result and result.get("bbox"):
                             tracking_active = True
@@ -93,7 +93,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
                             tracking_centroid = result["centroid"]
                             tracking_confidence = result.get("confidence", 0)
                             sam_connected = True
-                            print(f"[Backend] SAM 2 tracking initialized — bbox={tracking_bbox}, conf={tracking_confidence:.2f}")
+                            print(f"[Backend] SAM 3 tracking initialized — bbox={tracking_bbox}, conf={tracking_confidence:.2f}")
 
                             # Send initial tracking data to frontend
                             await websocket.send_json({
@@ -107,7 +107,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
                             tracking_active = True
                             tracking_centroid = [click_x, click_y]
                             sam_connected = False
-                            print("[Backend] SAM 2 unreachable, tracking at click point only")
+                            print("[Backend] SAM 3 unreachable, tracking at click point only")
 
                             await websocket.send_json({
                                 "type": "tracking_update",
@@ -155,7 +155,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
             # 1. Zero-Trust Privacy Filter
             frame = privacy_filter.apply(frame)
 
-            # 2. SAM 2 Tracking — send frame to Colab for mask update
+            # 2. SAM 3 Tracking — send frame to Colab for mask update
             if tracking_active and sam_connected and frame_counter % SAM_UPDATE_INTERVAL == 0:
                 result = await sam_client.update_tracking(current_frame)
                 if result and result.get("bbox"):

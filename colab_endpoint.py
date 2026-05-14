@@ -1,4 +1,4 @@
-# ChronoGuard AI - Google Colab Endpoint Setup
+# ChronoGuard AI - Google Colab Endpoint Setup (SAM 3)
 # Copy and paste this code into a Google Colab Notebook cell
 
 # ==========================================
@@ -9,18 +9,25 @@ import sys
 
 def install_deps():
     print("Installing dependencies...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "git+https://github.com/facebookresearch/sam2.git"])
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "fastapi", "uvicorn", "pyngrok", "nest-asyncio", "python-multipart", "opencv-python-headless"])
-    
-    print("Downloading SAM 2.1 checkpoint...")
-    subprocess.check_call("mkdir -p checkpoints", shell=True)
-    subprocess.check_call("wget -q -O checkpoints/sam2.1_hiera_large.pt https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt", shell=True)
-    print("Setup complete.")
+
+    # ── SAM 3 core package ──────────────────────────────────────────────────
+    # SAM 3 checkpoints are gated on HuggingFace (facebook/sam3).
+    # You MUST have:
+    #   1. Accepted the license at https://huggingface.co/facebook/sam3
+    #   2. A HuggingFace access token added to Colab Secrets as "HF_TOKEN"
+    # Once access is approved, this single pip install pulls everything.
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "git+https://github.com/facebookresearch/sam3.git"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
+                           "fastapi", "uvicorn", "pyngrok", "nest-asyncio",
+                           "python-multipart", "opencv-python-headless",
+                           "huggingface_hub"])
+
+    print("Setup complete. Weights will be downloaded automatically via HuggingFace after login.")
 
 install_deps()
 
 # ==========================================
-# CELL 2: Start FastAPI Server with SAM 2 on Port 8080
+# CELL 2: Start FastAPI Server with SAM 3 on Port 8080
 # ==========================================
 import os
 import io
@@ -35,24 +42,45 @@ import nest_asyncio
 import uvicorn
 from pyngrok import ngrok
 from pydantic import BaseModel
-from sam2.build_sam import build_sam2_video_predictor
 
-# Set up device and optimizations
+# ── SAM 3 imports ───────────────────────────────────────────────────────────
+from sam3.model_builder import build_sam3_video_predictor
+
+# ── HuggingFace authentication ──────────────────────────────────────────────
+# SAM 3 weights are gated — authenticate before any model is built.
+# Add your HuggingFace token to Colab Secrets (Left sidebar -> 🔑 Secrets)
+# with the name "HF_TOKEN".
+try:
+    from google.colab import userdata
+    from huggingface_hub import login as hf_login
+
+    HF_TOKEN = userdata.get("HF_TOKEN")
+    if HF_TOKEN:
+        hf_login(token=HF_TOKEN, add_to_git_credential=False)
+        print("✅ HuggingFace authentication successful.")
+    else:
+        print("⚠️  WARNING: HF_TOKEN secret not set. SAM 3 weight download will fail.")
+        print("   → Visit https://huggingface.co/facebook/sam3 and accept the license,")
+        print("     then add your HF access token as 'HF_TOKEN' in Colab Secrets.")
+except Exception as e:
+    print(f"⚠️  HuggingFace auth skipped ({e}). Ensure you are authenticated separately.")
+
+# ── Device setup ─────────────────────────────────────────────────────────────
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 if torch.cuda.is_available():
     torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
     if torch.cuda.get_device_properties(0).major >= 8:
-        # Enable TF32 for Ampere+ GPUs (like A100, RTX 3000+) to speed up SAM 2
+        # Enable TF32 for Ampere+ GPUs (A100, RTX 3000+)
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-sam2_checkpoint = "checkpoints/sam2.1_hiera_large.pt"
-model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
-
-# Load SAM 2.1 as a video predictor for true memory-based streaming
-predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint, device=device)
+# ── Build SAM 3 video predictor ──────────────────────────────────────────────
+# SAM 3's builder resolves the checkpoint automatically via HuggingFace.
+# No manual checkpoint path or YAML config is needed (unlike SAM 2).
+gpus_to_use = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use if gpus_to_use else [0])
 
 app = FastAPI()
 
@@ -100,20 +128,23 @@ def encode_mask(mask_np):
 
 @app.get("/")
 async def root():
-    return {"status": "ChronoGuard SAM 2 Endpoint is active and ready for inference!"}
+    return {"status": "ChronoGuard SAM 3 Endpoint is active and ready for inference!"}
 
 
 @app.post("/init")
 async def init_tracking(req: InitRequest):
     img = decode_image(req.frame_base64)
-    # SAM 2 Video Predictor normally takes BGR as input if processing from JPEG directly via init_state,
-    # but since it reads from disk it will load it as RGB internally. We just write the BGR image to disk.
 
     # Clean up any existing session
     if req.session_id in active_sessions:
         try:
-            predictor.reset_state(active_sessions[req.session_id]["state"])
-            shutil.rmtree(active_sessions[req.session_id]["tmp_dir"], ignore_errors=True)
+            old_session = active_sessions[req.session_id]
+            if "real_session_id" in old_session:
+                predictor.handle_request({
+                    "type": "close_session",
+                    "session_id": old_session["real_session_id"]
+                })
+            shutil.rmtree(old_session.get("tmp_dir", ""), ignore_errors=True)
         except Exception:
             pass
 
@@ -123,22 +154,53 @@ async def init_tracking(req: InitRequest):
     cv2.imwrite(frame_path, img)
 
     with torch.inference_mode(), torch.autocast(device.type, dtype=torch.bfloat16):
-        inference_state = predictor.init_state(video_path=tmp_dir)
+        # SAM 3: Use handle_request API
+        session_res = predictor.handle_request({
+            "type": "start_session",
+            "resource_path": tmp_dir,
+        })
+        real_session_id = session_res["session_id"]
 
-        frame_idx, obj_ids, masks = predictor.add_new_points_or_box(
-            inference_state,
-            frame_idx=0,
-            obj_id=1,
-            points=np.array([[req.click_x, req.click_y]], dtype=np.float32),
-            labels=np.array([1], dtype=np.int32),
-        )
+        prompt_res = predictor.handle_request({
+            "type": "add_prompt",
+            "session_id": real_session_id,
+            "frame_index": 0,
+            "obj_id": 1,
+            "points": [[req.click_x, req.click_y]],
+            "point_labels": [1],
+        })
 
-    best_mask = (masks[0][0].cpu().numpy() > 0).astype(np.uint8)
+    # SAM 3's add_prompt returns:
+    #   {"frame_index": int, "outputs": (obj_ids, low_res_masks, video_res_masks)}
+    # where video_res_masks is a tensor of shape (num_objs, 1, H, W)
+    outputs = prompt_res.get("outputs", None)
+
+    best_mask = None
+    if outputs is not None:
+        if isinstance(outputs, tuple):
+            # Expected format: (obj_ids, low_res_masks, video_res_masks)
+            video_res_masks = outputs[-1]  # last element is video_res_masks
+            if video_res_masks is not None and hasattr(video_res_masks, 'cpu'):
+                best_mask = (video_res_masks[0, 0].cpu().numpy() > 0).astype(np.uint8)
+        elif isinstance(outputs, dict):
+            # Fallback: some SAM 3 versions may return a dict
+            for key in ["video_res_masks", "out_binary_masks", "masks"]:
+                if key in outputs:
+                    m = outputs[key]
+                    if hasattr(m, 'cpu'):
+                        best_mask = (m[0, 0].cpu().numpy() > 0).astype(np.uint8)
+                    else:
+                        best_mask = (np.array(m)[0, 0] > 0).astype(np.uint8)
+                    break
+    
+    if best_mask is None:
+        best_mask = np.zeros((480, 640), dtype=np.uint8)
     bbox = mask_to_bbox(best_mask)
     centroid = mask_to_centroid(best_mask)
 
     active_sessions[req.session_id] = {
-        "state": inference_state,
+        "state": None, # SAM 3 manages internal state via session_id
+        "real_session_id": real_session_id,
         "tmp_dir": tmp_dir,
         "frame_count": 1,
     }
@@ -152,7 +214,7 @@ async def init_tracking(req: InitRequest):
     }
 
 
-MAX_FRAMES_ON_DISK = 7  # matches SAM 2's default num_maskmem
+MAX_FRAMES_ON_DISK = 7  # matches SAM 3's default memory window
 
 @app.post("/update")
 async def update_tracking(req: UpdateRequest):
@@ -176,15 +238,34 @@ async def update_tracking(req: UpdateRequest):
     centroid = None
 
     with torch.inference_mode(), torch.autocast(device.type, dtype=torch.bfloat16):
-        # propagate_in_video processes from start_frame_idx onward
-        # It uses the memory bank built from all prior frames automatically
-        for out_frame_idx, out_obj_ids, out_masks in predictor.propagate_in_video(
-            inference_state,
-            start_frame_idx=frame_idx,
-        ):
-            best_mask = (out_masks[0][0].cpu().numpy() > 0).astype(np.uint8)
-            bbox = mask_to_bbox(best_mask)
-            centroid = mask_to_centroid(best_mask)
+        # SAM 3: propagate API using handle_stream_request
+        for response in predictor.handle_stream_request({
+            "type": "propagate_in_video",
+            "session_id": session["real_session_id"],
+            "start_frame_index": frame_idx,
+            "propagation_direction": "forward",
+            "max_frame_num_to_track": 1,
+        }):
+            outputs = response.get("outputs", None)
+            if outputs is not None:
+                if isinstance(outputs, tuple):
+                    # Expected: (obj_ids, video_res_masks) or (obj_ids, low_res, video_res)
+                    video_res_masks = outputs[-1]
+                    if video_res_masks is not None and hasattr(video_res_masks, 'cpu'):
+                        best_mask = (video_res_masks[0, 0].cpu().numpy() > 0).astype(np.uint8)
+                        bbox = mask_to_bbox(best_mask)
+                        centroid = mask_to_centroid(best_mask)
+                elif isinstance(outputs, dict):
+                    for key in ["video_res_masks", "out_binary_masks", "masks"]:
+                        if key in outputs:
+                            m = outputs[key]
+                            if hasattr(m, 'cpu'):
+                                best_mask = (m[0, 0].cpu().numpy() > 0).astype(np.uint8)
+                            else:
+                                best_mask = (np.array(m)[0, 0] > 0).astype(np.uint8)
+                            bbox = mask_to_bbox(best_mask)
+                            centroid = mask_to_centroid(best_mask)
+                            break
             break  # we only want the current frame result
 
     # Prune old frames from disk to avoid filling Colab storage
@@ -213,7 +294,11 @@ async def reset_session(req: dict):
     if session_id in active_sessions:
         session = active_sessions[session_id]
         try:
-            predictor.reset_state(session["state"])
+            # SAM 3: close session
+            predictor.handle_request({
+                "type": "close_session",
+                "session_id": session["real_session_id"]
+            })
             shutil.rmtree(session["tmp_dir"], ignore_errors=True)
         except Exception:
             pass
@@ -244,15 +329,15 @@ else:
     print("WARNING: Please set your NGROK_AUTH_TOKEN in Colab Secrets (Name: NGROK_TOKEN)")
 
 if __name__ == "__main__":
-    print("🚀 Starting FastAPI server... (This cell will keep running)")
+    print("🚀 Starting FastAPI server with SAM 3... (This cell will keep running)")
     print("👀 Watch this output for incoming requests or errors.")
-    
-    # In Jupyter/Colab, an event loop is already running. 
+
+    # In Jupyter/Colab, an event loop is already running.
     # Calling uvicorn.run() directly causes an asyncio error.
     # Instead, we create a config and await the server explicitly.
     import nest_asyncio
     nest_asyncio.apply()
-    
+
     config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
