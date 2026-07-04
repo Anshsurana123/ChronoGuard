@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Play, Pause, Square, Crosshair, Map, ShieldAlert, History, Activity, AlertTriangle, Settings, Camera, Check, Trash2 } from "lucide-react";
+import { Play, Pause, Square, Crosshair, Map, ShieldAlert, History, Activity, AlertTriangle, Settings, Camera, Check, Trash2, Link2 } from "lucide-react";
 
 export default function Dashboard() {
   const [isStreaming, setIsStreaming] = useState(false);
@@ -15,10 +15,44 @@ export default function Dashboard() {
   const [trackingConfidence, setTrackingConfidence] = useState(0);
   const [samConnected, setSamConnected] = useState(false);
   const [frameData, setFrameData] = useState<string | null>(null);
+  
+  // Dynamic Colab Endpoint Configuration State
+  const [ngrokUrl, setNgrokUrl] = useState("https://b2d9-34-6-88-71.ngrok-free.app");
+  const [isApplyingUrl, setIsApplyingUrl] = useState(false);
+  const [urlAppliedSuccess, setUrlAppliedSuccess] = useState(false);
+
   const wsRef = useRef<WebSocket | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Load saved ngrok URL from local storage on mount
+  useEffect(() => {
+    const savedUrl = localStorage.getItem("chrono_ngrok_url");
+    if (savedUrl) {
+      setNgrokUrl(savedUrl);
+    }
+  }, []);
+
+  // Callback to submit/apply the endpoint URL to backend
+  const handleApplyNgrokUrl = useCallback(() => {
+    localStorage.setItem("chrono_ngrok_url", ngrokUrl);
+    setIsApplyingUrl(true);
+    
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "update_endpoint", endpoint_url: ngrokUrl }));
+      // We will also reset samConnected since we just changed target predictor
+      setSamConnected(false);
+      setTimeout(() => {
+        setIsApplyingUrl(false);
+      }, 600);
+    } else {
+      setIsApplyingUrl(false);
+      setUrlAppliedSuccess(true);
+      setTimeout(() => setUrlAppliedSuccess(false), 2000);
+    }
+  }, [ngrokUrl]);
+
 
   // The actual frame resolution from the backend
   const FRAME_W = 640;
@@ -349,6 +383,13 @@ export default function Dashboard() {
     if (isStreaming) {
       wsRef.current = new WebSocket("ws://localhost:8000/ws/video");
       
+      wsRef.current.onopen = () => {
+        const savedUrl = localStorage.getItem("chrono_ngrok_url") || ngrokUrl;
+        if (savedUrl && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: "update_endpoint", endpoint_url: savedUrl }));
+        }
+      };
+
       wsRef.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === "frame") {
@@ -366,6 +407,9 @@ export default function Dashboard() {
         } else if (data.type === "alert") {
           // Real-time alert from backend (e.g. geofence breach)
           setAlerts((prev) => [data.data, ...prev]);
+        } else if (data.type === "endpoint_updated") {
+          setUrlAppliedSuccess(true);
+          setTimeout(() => setUrlAppliedSuccess(false), 3000);
         }
       };
 
@@ -384,7 +428,7 @@ export default function Dashboard() {
         wsRef.current.close();
       }
     };
-  }, [isStreaming]);
+  }, [isStreaming, ngrokUrl]);
 
   const [alerts, setAlerts] = useState<{ id: number; time: string; type: string }[]>([
     { id: 1, time: "10:42:05", type: "Geofence Breach" },
@@ -418,6 +462,48 @@ export default function Dashboard() {
               <span className="flex items-center gap-2 text-sm"><div className={`w-2 h-2 rounded-full ${samConnected ? 'bg-green-500 animate-pulse' : isStreaming ? 'bg-yellow-500' : 'bg-red-500'}`} /> SAM 3 Predictor</span>
               <span className="text-xs font-mono text-muted">{samConnected ? 'TRACKING' : trackingPoint ? 'OFFLINE' : 'IDLE'}</span>
             </div>
+          </div>
+
+          <div className="border-t border-border/40 my-5" />
+
+          <div className="space-y-3">
+            <h2 className="text-xs uppercase tracking-widest text-muted font-semibold flex items-center justify-between">
+              <span>SAM 3 Colab Bridge</span>
+              <Link2 className="w-3.5 h-3.5 text-primary animate-pulse" />
+            </h2>
+            <p className="text-[10.5px] text-muted leading-relaxed">
+              Route vision tasks to your hosted SAM 3 engine. Paste the public ngrok endpoint URL from Colab:
+            </p>
+            <div className="relative group">
+              <input
+                type="text"
+                value={ngrokUrl}
+                onChange={(e) => setNgrokUrl(e.target.value)}
+                placeholder="https://your-tunnel.ngrok-free.app"
+                className="w-full bg-black/55 border border-white/10 rounded-lg p-2.5 pl-3 pr-20 text-[11px] font-mono text-white placeholder-white/20 transition-all duration-300 focus:outline-none focus:border-primary/80 focus:ring-1 focus:ring-primary/20"
+              />
+              <button
+                onClick={handleApplyNgrokUrl}
+                disabled={isApplyingUrl}
+                className="absolute right-1 top-1 bottom-1 px-3 text-[10px] font-medium bg-primary/10 text-primary border border-primary/25 rounded-md hover:bg-primary/20 active:scale-95 transition-all flex items-center gap-1 cursor-pointer disabled:opacity-50"
+              >
+                {urlAppliedSuccess ? (
+                  <>
+                    <Check className="w-3 h-3 text-green-400" />
+                    <span className="text-green-400">Linked</span>
+                  </>
+                ) : isApplyingUrl ? (
+                  <span>Syncing...</span>
+                ) : (
+                  <span>Apply</span>
+                )}
+              </button>
+            </div>
+            {urlAppliedSuccess && (
+              <p className="text-[10px] text-green-400 flex items-center gap-1 animate-fadeIn">
+                <Check className="w-2.5 h-2.5" /> Bridge synchronized!
+              </p>
+            )}
           </div>
         </div>
 

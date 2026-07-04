@@ -104,8 +104,42 @@ def decode_image(b64_str):
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     return img
 
+def _extract_mask(raw) -> np.ndarray:
+    """
+    Safely squeeze a SAM 3 mask tensor/array to exactly 2D (H, W).
+    Handles shapes like (H,W), (1,H,W), (N,1,H,W), etc.
+    """
+    arr = raw.cpu().numpy() if hasattr(raw, 'cpu') else np.array(raw)
+    arr = np.squeeze(arr)           # drop all size-1 dims first
+    while arr.ndim > 2:             # still >2D? peel leading dim
+        arr = arr[0]
+    if arr.ndim != 2:
+        raise ValueError(f"Mask is {arr.ndim}D after squeezing (shape={arr.shape})")
+    return (arr > 0).astype(np.uint8)
+
+
+def safe_squeeze_mask(mask_np):
+    """
+    Ensure mask is exactly 2D (H, W).
+    SAM 3 may return tensors of shape (1, H, W), (num_objs, 1, H, W), etc.
+    Squeeze away all leading size-1 dimensions until we have 2D.
+    Raises ValueError if the result is not 2D.
+    """
+    mask_np = np.squeeze(mask_np)          # drop ALL size-1 dims
+    if mask_np.ndim == 1:
+        raise ValueError(
+            f"mask_to_bbox: mask squeezed to 1D (shape={mask_np.shape}). "
+            "The SAM 3 output tensor had an unexpected shape — check indexing."
+        )
+    if mask_np.ndim > 2:
+        while mask_np.ndim > 2:
+            mask_np = mask_np[0]
+    return mask_np
+
+
 def mask_to_bbox(mask_np):
-    """Extract bounding box [x, y, w, h] from a binary mask."""
+    """Extract bounding box [x, y, w, h] from a binary mask (any squeezable shape)."""
+    mask_np = safe_squeeze_mask(mask_np)   # ensure 2D before np.where
     ys, xs = np.where(mask_np > 0)
     if len(xs) == 0 or len(ys) == 0:
         return None
@@ -114,7 +148,8 @@ def mask_to_bbox(mask_np):
     return [x_min, y_min, x_max - x_min, y_max - y_min]
 
 def mask_to_centroid(mask_np):
-    """Extract centroid (cx, cy) from a binary mask."""
+    """Extract centroid (cx, cy) from a binary mask (any squeezable shape)."""
+    mask_np = safe_squeeze_mask(mask_np)   # ensure 2D before np.where
     ys, xs = np.where(mask_np > 0)
     if len(xs) == 0 or len(ys) == 0:
         return None
@@ -153,6 +188,11 @@ async def init_tracking(req: InitRequest):
     frame_path = os.path.join(tmp_dir, "00000.jpg")
     cv2.imwrite(frame_path, img)
 
+    # Normalize coordinates for SAM 3
+    height, width = img.shape[:2]
+    click_x_rel = float(req.click_x) / width
+    click_y_rel = float(req.click_y) / height
+
     with torch.inference_mode(), torch.autocast(device.type, dtype=torch.bfloat16):
         # SAM 3: Use handle_request API
         session_res = predictor.handle_request({
@@ -166,8 +206,9 @@ async def init_tracking(req: InitRequest):
             "session_id": real_session_id,
             "frame_index": 0,
             "obj_id": 1,
-            "points": [[req.click_x, req.click_y]],
+            "points": [[click_x_rel, click_y_rel]],
             "point_labels": [1],
+            "rel_coordinates": True,
         })
 
     # SAM 3's add_prompt returns:
@@ -177,24 +218,22 @@ async def init_tracking(req: InitRequest):
 
     best_mask = None
     if outputs is not None:
-        if isinstance(outputs, tuple):
-            # Expected format: (obj_ids, low_res_masks, video_res_masks)
-            video_res_masks = outputs[-1]  # last element is video_res_masks
-            if video_res_masks is not None and hasattr(video_res_masks, 'cpu'):
-                best_mask = (video_res_masks[0, 0].cpu().numpy() > 0).astype(np.uint8)
-        elif isinstance(outputs, dict):
-            # Fallback: some SAM 3 versions may return a dict
-            for key in ["video_res_masks", "out_binary_masks", "masks"]:
-                if key in outputs:
-                    m = outputs[key]
-                    if hasattr(m, 'cpu'):
-                        best_mask = (m[0, 0].cpu().numpy() > 0).astype(np.uint8)
-                    else:
-                        best_mask = (np.array(m)[0, 0] > 0).astype(np.uint8)
-                    break
-    
+        try:
+            if isinstance(outputs, tuple):
+                video_res_masks = outputs[-1]
+                if video_res_masks is not None:
+                    best_mask = _extract_mask(video_res_masks)
+            elif isinstance(outputs, dict):
+                for key in ["video_res_masks", "out_binary_masks", "masks"]:
+                    if key in outputs:
+                        best_mask = _extract_mask(outputs[key])
+                        break
+        except Exception as e:
+            print(f"[/init] Warning: mask extraction failed ({e}). Using empty mask.")
+            best_mask = None
+
     if best_mask is None:
-        best_mask = np.zeros((480, 640), dtype=np.uint8)
+        best_mask = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
     bbox = mask_to_bbox(best_mask)
     centroid = mask_to_centroid(best_mask)
 
@@ -222,7 +261,6 @@ async def update_tracking(req: UpdateRequest):
         return {"error": "Session not found. Call /init first."}
 
     session = active_sessions[req.session_id]
-    inference_state = session["state"]
     tmp_dir = session["tmp_dir"]
     frame_idx = session["frame_count"]
 
@@ -232,6 +270,78 @@ async def update_tracking(req: UpdateRequest):
     frame_path = os.path.join(tmp_dir, f"{frame_idx:05d}.jpg")
     cv2.imwrite(frame_path, img)
     session["frame_count"] += 1
+
+    # Intercept SAM 3 internal state and dynamically append the new frame in memory
+    real_session_id = session["real_session_id"]
+    inference_state = predictor._all_inference_states[real_session_id]["state"]
+
+    if inference_state is not None:
+        # Determine target image dimensions, device, and dtype from existing state images
+        if "images" in inference_state and inference_state["images"]:
+            if isinstance(inference_state["images"], list):
+                image_size = inference_state["images"][0].shape[-1]
+                target_device = inference_state["images"][0].device
+                target_dtype = inference_state["images"][0].dtype
+            else:
+                image_size = inference_state["images"].shape[-1]
+                target_device = inference_state["images"].device
+                target_dtype = inference_state["images"].dtype
+        else:
+            image_size = 1024
+            target_device = device
+            target_dtype = torch.float32
+
+        # Preprocess frame to ImageNet stats
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img_resized = cv2.resize(img_rgb, (image_size, image_size))
+        img_tensor = torch.from_numpy(img_resized).permute(2, 0, 1).to(device=target_device, dtype=target_dtype) / 255.0
+        
+        img_mean = torch.tensor([0.485, 0.456, 0.406], device=target_device, dtype=target_dtype).view(3, 1, 1)
+        img_std = torch.tensor([0.229, 0.224, 0.225], device=target_device, dtype=target_dtype).view(3, 1, 1)
+        img_normalized = (img_tensor - img_mean) / img_std
+
+        # Append/concatenate in memory
+        if "images" in inference_state:
+            if isinstance(inference_state["images"], list):
+                # Match rank shape (e.g. [1, 3, H, W] or [3, H, W])
+                first_img = inference_state["images"][0]
+                new_img = img_normalized.unsqueeze(0) if first_img.ndim == 4 else img_normalized
+                inference_state["images"].append(new_img)
+            elif isinstance(inference_state["images"], torch.Tensor):
+                inference_state["images"] = torch.cat([inference_state["images"], img_normalized.unsqueeze(0)], dim=0)
+
+        # Synchronize relevant image index lists if present in state
+        for key in ["images_idx", "images_idxs", "frame_indices"]:
+            if key in inference_state:
+                val = inference_state[key]
+                if isinstance(val, list):
+                    val.append(frame_idx)
+                elif isinstance(val, torch.Tensor):
+                    new_idx_tensor = torch.tensor([frame_idx], device=val.device, dtype=val.dtype)
+                    inference_state[key] = torch.cat([val, new_idx_tensor], dim=0)
+
+        # Dynamically resize other per-frame tracking states to prevent IndexError
+        old_num_frames = inference_state.get("num_frames", 0)
+        if old_num_frames > 0:
+            for k, v in list(inference_state.items()):
+                if k in ["images", "images_idx", "images_idxs", "frame_indices"]:
+                    continue
+                if isinstance(v, list) and len(v) == old_num_frames:
+                    # Provide appropriate defaults to prevent downstream subscript/type errors
+                    default_val = None
+                    if k == "action_history":
+                        default_val = {"type": ""}
+                    elif k == "per_frame_cur_step":
+                        default_val = 0
+                    elif k == "tracker_inference_states":
+                        default_val = {"obj_ids": []}
+                    
+                    v.append(default_val)
+                    print(f"[colab_endpoint] Dynamically resized list state '{k}' from {old_num_frames} to {len(v)}")
+
+        # Increment total number of frames in inference state
+        if "num_frames" in inference_state:
+            inference_state["num_frames"] += 1
 
     best_mask = None
     bbox = None
@@ -248,24 +358,22 @@ async def update_tracking(req: UpdateRequest):
         }):
             outputs = response.get("outputs", None)
             if outputs is not None:
-                if isinstance(outputs, tuple):
-                    # Expected: (obj_ids, video_res_masks) or (obj_ids, low_res, video_res)
-                    video_res_masks = outputs[-1]
-                    if video_res_masks is not None and hasattr(video_res_masks, 'cpu'):
-                        best_mask = (video_res_masks[0, 0].cpu().numpy() > 0).astype(np.uint8)
-                        bbox = mask_to_bbox(best_mask)
-                        centroid = mask_to_centroid(best_mask)
-                elif isinstance(outputs, dict):
-                    for key in ["video_res_masks", "out_binary_masks", "masks"]:
-                        if key in outputs:
-                            m = outputs[key]
-                            if hasattr(m, 'cpu'):
-                                best_mask = (m[0, 0].cpu().numpy() > 0).astype(np.uint8)
-                            else:
-                                best_mask = (np.array(m)[0, 0] > 0).astype(np.uint8)
+                try:
+                    if isinstance(outputs, tuple):
+                        video_res_masks = outputs[-1]
+                        if video_res_masks is not None:
+                            best_mask = _extract_mask(video_res_masks)
                             bbox = mask_to_bbox(best_mask)
                             centroid = mask_to_centroid(best_mask)
-                            break
+                    elif isinstance(outputs, dict):
+                        for key in ["video_res_masks", "out_binary_masks", "masks"]:
+                            if key in outputs:
+                                best_mask = _extract_mask(outputs[key])
+                                bbox = mask_to_bbox(best_mask)
+                                centroid = mask_to_centroid(best_mask)
+                                break
+                except Exception as e:
+                    print(f"[/update] Warning: mask extraction failed ({e}).")
             break  # we only want the current frame result
 
     # Prune old frames from disk to avoid filling Colab storage
@@ -333,11 +441,14 @@ if __name__ == "__main__":
     print("👀 Watch this output for incoming requests or errors.")
 
     # In Jupyter/Colab, an event loop is already running.
-    # Calling uvicorn.run() directly causes an asyncio error.
-    # Instead, we create a config and await the server explicitly.
+    # We apply nest_asyncio to allow nested event loops, then run the async main function.
     import nest_asyncio
+    import asyncio
     nest_asyncio.apply()
 
-    config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
+    async def start_server():
+        config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    asyncio.run(start_server())

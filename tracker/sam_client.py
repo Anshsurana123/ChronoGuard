@@ -124,6 +124,16 @@ class SamClient:
         self.session_id = str(uuid.uuid4())
         self.initialized = False
 
+    async def update_endpoint(self, endpoint_url: str):
+        """Dynamically updates the endpoint URL and resets the tracking session."""
+        self.endpoint_url = endpoint_url.rstrip("/")
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
+        self._http_session = None
+        self.session_id = str(uuid.uuid4())
+        self.initialized = False
+
     async def close(self):
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
+

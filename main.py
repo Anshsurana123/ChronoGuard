@@ -34,7 +34,7 @@ privacy_filter = PrivacyFilter()
 # ------------------------------------------------------------------
 # Set your Colab ngrok URL here (or via SAM_ENDPOINT env var)
 # ------------------------------------------------------------------
-SAM_ENDPOINT = os.environ.get("SAM_ENDPOINT", "https://d00f-34-6-88-71.ngrok-free.app")
+SAM_ENDPOINT = os.environ.get("SAM_ENDPOINT", "https://b2d9-34-6-88-71.ngrok-free.app")
 sam_client = SamClient(endpoint_url=SAM_ENDPOINT)
 
 temporal_engine = TemporalEngine(time_hop_interval=15)
@@ -119,6 +119,17 @@ async def websocket_video_endpoint(websocket: WebSocket):
                 elif msg.get("type") == "set_geofence":
                     print("[Backend] Received geofence points:", msg["points"])
                     geofence_engine.set_polygon(msg["points"])
+
+                elif msg.get("type") == "update_endpoint":
+                    new_url = msg.get("endpoint_url", "").rstrip("/")
+                    if new_url:
+                        print(f"[Backend] Dynamic endpoint update request received: {new_url}")
+                        await sam_client.update_endpoint(new_url)
+                        sam_connected = False
+                        await websocket.send_json({
+                            "type": "endpoint_updated",
+                            "endpoint_url": new_url,
+                        })
 
                 elif msg.get("type") == "stop_analysis":
                     tracking_active = False
