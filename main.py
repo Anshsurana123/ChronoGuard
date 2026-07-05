@@ -18,6 +18,17 @@ from tracker.yolo_tracker import YoloTracker
 from engine.temporal_engine import TemporalEngine
 from engine.geofence import Geofence
 from engine.alerts import AlertSystem
+from engine.db import init_db, get_camera, get_all_cameras
+from tracker.camera_manager import CameraManager
+
+# Initialize Database and CameraManager
+init_db()
+camera_manager = CameraManager()
+try:
+    for cam in get_all_cameras():
+        camera_manager.register_camera(cam["id"], cam["source"])
+except Exception as e:
+    print(f"[Backend] Warning: Failed to pre-register cameras from DB: {e}")
 
 app = FastAPI(title="ChronoGuard AI Backend")
 
@@ -32,14 +43,14 @@ app.add_middleware(
 # Initialize engines
 privacy_filter = PrivacyFilter()
 
-# Local YOLO-World + ByteTrack Tracker
+# Local YOLOE + ByteTrack Tracker
 tracker_ready = False
 try:
     yolo_tracker = YoloTracker()
     tracker_ready = True
-    print("[Backend] Local YOLO-World tracker initialized successfully.")
+    print("[Backend] Local YOLOE tracker initialized successfully.")
 except Exception as e:
-    print(f"\n[Backend] CRITICAL ERROR: Failed to initialize local YOLO-World tracker: {e}\n")
+    print(f"\n[Backend] CRITICAL ERROR: Failed to initialize local YOLOE tracker: {e}\n")
     yolo_tracker = None
 
 temporal_engine = TemporalEngine(time_hop_interval=15)
@@ -56,18 +67,25 @@ tracking_confidence = 0.0
 
 @app.get("/")
 async def root():
-    return {"status": "ChronoGuard Local Backend Active", "tracker": "YOLO-World + ByteTrack", "tracker_ready": tracker_ready}
+    return {"status": "ChronoGuard Local Backend Active", "tracker": "YOLOE + ByteTrack", "tracker_ready": tracker_ready}
 
 @app.websocket("/ws/video")
-async def websocket_video_endpoint(websocket: WebSocket):
+async def websocket_video_endpoint(websocket: WebSocket, camera_id: str = "camera_1"):
     global current_frame, tracking_active
     global tracking_target, tracking_bbox, tracking_centroid, tracking_confidence
 
     await websocket.accept()
-    cap = cv2.VideoCapture(0)
-
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    
+    # Resolve and dynamically register camera if needed
+    cam_info = get_camera(camera_id)
+    if cam_info:
+        camera_manager.register_camera(camera_id, cam_info["source"])
+    else:
+        print(f"[Backend] Unknown camera ID '{camera_id}' requested. Falling back to 'camera_1'.")
+        camera_id = "camera_1"
+        cam_info = get_camera(camera_id)
+        if cam_info:
+            camera_manager.register_camera(camera_id, cam_info["source"])
 
     # Background task to receive messages from Next.js
     async def receive_messages():
@@ -174,8 +192,9 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret:
+            # Fetch latest frame from camera manager
+            frame = camera_manager.get_frame(camera_id)
+            if frame is None:
                 await asyncio.sleep(0.1)
                 continue
 
@@ -290,7 +309,6 @@ async def websocket_video_endpoint(websocket: WebSocket):
         print(f"[Backend] Error in video stream: {e}")
     finally:
         recv_task.cancel()
-        cap.release()
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
