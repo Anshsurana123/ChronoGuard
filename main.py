@@ -416,6 +416,7 @@ async def websocket_video_endpoint(websocket: WebSocket, camera_id: str = "camer
                             pass
 
             # Draw live status overlay on frame to confirm active streaming pipeline
+            frame = frame.copy()
             h, w = frame.shape[:2]
             cv2.putText(
                 frame,
