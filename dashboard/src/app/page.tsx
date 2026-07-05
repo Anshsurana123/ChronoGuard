@@ -128,7 +128,6 @@ export default function Dashboard() {
             trackerReady: data.tracker_ready,
             camerasRegistered: data.cameras_registered
           });
-          setSamConnected(data.tracker_ready);
         }
       })
       .catch(err => {});
@@ -577,7 +576,12 @@ export default function Dashboard() {
             </div>
 
             <div className="flex items-center justify-between p-3 rounded-lg bg-black/40 border border-border">
-              <span className="flex items-center gap-2 text-sm"><div className={`w-2 h-2 rounded-full ${samConnected ? 'bg-green-500 animate-pulse' : isStreaming ? 'bg-yellow-500' : 'bg-red-500'}`} /> YOLOE Tracker</span>
+              <span className="flex items-center gap-2 text-sm"><div className={`w-2 h-2 rounded-full ${telemetry?.trackerReady ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} /> YOLOE Model</span>
+              <span className="text-xs font-mono text-muted">{telemetry?.trackerReady ? 'ONLINE' : 'OFFLINE'}</span>
+            </div>
+
+            <div className="flex items-center justify-between p-3 rounded-lg bg-black/40 border border-border">
+              <span className="flex items-center gap-2 text-sm"><div className={`w-2 h-2 rounded-full ${samConnected ? 'bg-green-500 animate-pulse' : 'bg-black/50 border border-border'}`} /> Tracking State</span>
               <span className="text-xs font-mono text-muted">{samConnected ? 'TRACKING' : trackingPoint ? 'ACQUIRING' : 'IDLE'}</span>
             </div>
           </div>
@@ -651,7 +655,7 @@ export default function Dashboard() {
               </div>
               {trackingPoint && !isTrackingMode && (
                 <span className={`text-[10px] font-mono ${samConnected ? 'text-green-400' : 'text-yellow-400'}`}>
-                  {samConnected ? 'SAM3 LIVE' : 'FALLBACK'}
+                  {samConnected ? 'ACTIVE' : 'ACQUIRING'}
                 </span>
               )}
             </button>

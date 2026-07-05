@@ -415,6 +415,19 @@ async def websocket_video_endpoint(websocket: WebSocket, camera_id: str = "camer
                         except Exception:
                             pass
 
+            # Draw live status overlay on frame to confirm active streaming pipeline
+            h, w = frame.shape[:2]
+            cv2.putText(
+                frame,
+                f"LIVE STREAM: {camera_id.upper()} | {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                (20, h - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                1,
+                cv2.LINE_AA
+            )
+
             # 4. Compress and Send clean frame
             _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             frame_b64 = base64.b64encode(buffer).decode('utf-8')
