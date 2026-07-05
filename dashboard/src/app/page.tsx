@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Play, Pause, Square, Crosshair, Map, ShieldAlert, History, Activity, AlertTriangle, Settings, Camera, Check, Trash2, Link2 } from "lucide-react";
+import { Play, Pause, Square, Crosshair, Map, ShieldAlert, History, Activity, AlertTriangle, Settings, Camera, Check, Trash2, Link2, Shield } from "lucide-react";
 
 export default function Dashboard() {
   const [isStreaming, setIsStreaming] = useState(false);
@@ -20,6 +20,13 @@ export default function Dashboard() {
   const [ngrokUrl, setNgrokUrl] = useState("https://b2d9-34-6-88-71.ngrok-free.app");
   const [isApplyingUrl, setIsApplyingUrl] = useState(false);
   const [urlAppliedSuccess, setUrlAppliedSuccess] = useState(false);
+
+  // Privacy & Camera Configuration States
+  const [selectedCamera, setSelectedCamera] = useState("camera_1");
+  const [faceBlurEnabled, setFaceBlurEnabled] = useState(false);
+  const [authToken, setAuthToken] = useState("ChronoGuardStaffToken2026");
+  const [retentionDays, setRetentionDays] = useState(30);
+  const [selectedSnapshot, setSelectedSnapshot] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -52,8 +59,69 @@ export default function Dashboard() {
       setTimeout(() => setUrlAppliedSuccess(false), 2000);
     }
   }, [ngrokUrl]);
+  // Load settings on startup / camera selection / token change
+  useEffect(() => {
+    if (!authToken) return;
+    fetch("http://localhost:8000/api/cameras", {
+      headers: { "Authorization": `Bearer ${authToken}` }
+    })
+    .then(res => {
+      if (!res.ok) throw new Error("Unauthorized");
+      return res.json();
+    })
+    .then(data => {
+      if (Array.isArray(data)) {
+        const currentCam = data.find((c: any) => c.id === selectedCamera);
+        if (currentCam) {
+          setFaceBlurEnabled(currentCam.face_blur_enabled === 1);
+        }
+      }
+    })
+    .catch(err => console.log("Waiting for backend API or invalid token"));
 
+    fetch("http://localhost:8000/api/settings/retention", {
+      headers: { "Authorization": `Bearer ${authToken}` }
+    })
+    .then(res => {
+      if (!res.ok) throw new Error("Unauthorized");
+      return res.json();
+    })
+    .then(data => {
+      if (data && data.retention_days) {
+        setRetentionDays(data.retention_days);
+      }
+    })
+    .catch(err => {});
+  }, [selectedCamera, authToken]);
 
+  const toggleFaceBlur = async () => {
+    const nextVal = !faceBlurEnabled;
+    setFaceBlurEnabled(nextVal);
+    try {
+      await fetch(`http://localhost:8000/api/cameras/${selectedCamera}/blur?enabled=${nextVal}`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${authToken}` }
+      });
+    } catch (err) {
+      console.error("Error updating face blur:", err);
+    }
+  };
+
+  const updateRetentionDays = async () => {
+    try {
+      const res = await fetch(`http://localhost:8000/api/settings/retention?days=${retentionDays}`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${authToken}` }
+      });
+      if (res.ok) {
+        alert(`Retention days set to ${retentionDays} successfully.`);
+      } else {
+        alert("Failed to update retention. Access denied.");
+      }
+    } catch (err) {
+      console.error("Error updating retention:", err);
+    }
+  };
   // The actual frame resolution from the backend
   const FRAME_W = 640;
   const FRAME_H = 480;
@@ -381,7 +449,7 @@ export default function Dashboard() {
   // WebSocket Connection Logic
   useEffect(() => {
     if (isStreaming) {
-      wsRef.current = new WebSocket("ws://localhost:8000/ws/video");
+      wsRef.current = new WebSocket(`ws://localhost:8000/ws/video?camera_id=${selectedCamera}`);
       
       wsRef.current.onopen = () => {
         const savedUrl = localStorage.getItem("chrono_ngrok_url") || ngrokUrl;
@@ -428,7 +496,7 @@ export default function Dashboard() {
         wsRef.current.close();
       }
     };
-  }, [isStreaming, ngrokUrl]);
+  }, [isStreaming, ngrokUrl, selectedCamera]);
 
   const [alerts, setAlerts] = useState<{ id: number; time: string; type: string }[]>([
     { id: 1, time: "10:42:05", type: "Geofence Breach" },
@@ -615,6 +683,79 @@ export default function Dashboard() {
             </button>
           </div>
         </div>
+
+        {/* Privacy & Camera Configuration */}
+        <div className="glass-panel p-6 flex flex-col gap-4 mt-6">
+          <h2 className="text-xs uppercase tracking-widest text-muted font-semibold flex items-center justify-between">
+            <span>Privacy & Camera Setup</span>
+            <Shield className="w-4 h-4 text-primary" />
+          </h2>
+
+          {/* Camera Selection */}
+          <div className="space-y-1.5">
+            <label className="text-[11px] text-muted uppercase">Active Camera</label>
+            <select
+              value={selectedCamera}
+              onChange={(e) => setSelectedCamera(e.target.value)}
+              className="w-full bg-black/50 border border-white/10 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-primary/50"
+            >
+              <option value="camera_1">Default Webcam (camera_1)</option>
+              <option value="camera_2">CCTV Main Gate (camera_2)</option>
+              <option value="camera_3">CCTV Hallway (camera_3)</option>
+            </select>
+          </div>
+
+          {/* Face Blur Toggle */}
+          <div className="flex items-center justify-between p-3 rounded-lg bg-white/5 border border-white/10">
+            <div className="flex flex-col">
+              <span className="text-sm font-semibold text-white">Face Redaction (YuNet)</span>
+              <span className="text-[10px] text-muted">Real-time deep learning blur</span>
+            </div>
+            <button
+              onClick={toggleFaceBlur}
+              className={`w-10 h-6 rounded-full transition-colors flex items-center px-1 ${faceBlurEnabled ? 'bg-primary' : 'bg-black/50 border border-border'}`}
+            >
+              <div className={`w-4 h-4 rounded-full bg-white transition-transform ${faceBlurEnabled ? 'translate-x-4' : 'translate-x-0'}`} />
+            </button>
+          </div>
+
+          {/* Snapshot Retention Settings (Admin/Staff Only) */}
+          <div className="border-t border-white/5 pt-4 space-y-3">
+            <div className="flex justify-between items-center">
+              <label className="text-[11px] text-muted uppercase">Admin Settings</label>
+              <span className="text-[9px] font-mono text-primary/70">Role: School Staff</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <span className="text-[10px] text-muted">Auth Token</span>
+                <input
+                  type="password"
+                  value={authToken}
+                  onChange={(e) => setAuthToken(e.target.value)}
+                  placeholder="Enter token..."
+                  className="w-full bg-black/50 border border-white/10 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-primary/50"
+                />
+              </div>
+              <div className="space-y-1">
+                <span className="text-[10px] text-muted">Retention (Days)</span>
+                <div className="flex gap-1">
+                  <input
+                    type="number"
+                    value={retentionDays}
+                    onChange={(e) => setRetentionDays(parseInt(e.target.value) || 30)}
+                    className="w-full bg-black/50 border border-white/10 rounded-lg p-2 text-xs text-white text-center focus:outline-none focus:border-primary/50"
+                  />
+                  <button
+                    onClick={updateRetentionDays}
+                    className="glass-button p-2 text-xs text-primary hover:border-primary/50"
+                  >
+                    Set
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Main Video View */}
@@ -627,8 +768,8 @@ export default function Dashboard() {
               LIVE <span className="text-muted ml-2">FPS: --</span>
             </div>
             <div className="px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-xs flex items-center gap-2">
-              <ShieldAlert className="w-3 h-3 text-primary" />
-              Privacy Filter: ON
+              <ShieldAlert className={`w-3 h-3 ${faceBlurEnabled ? 'text-primary' : 'text-muted'}`} />
+              Privacy Filter: {faceBlurEnabled ? 'ON' : 'OFF'}
             </div>
           </div>
 
@@ -686,7 +827,7 @@ export default function Dashboard() {
           </h2>
           
           <div className="flex-1 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
-            {alerts.map((alert) => (
+            {alerts.map((alert: any) => (
               <div key={alert.id} className="p-3 rounded-lg bg-black/40 border border-accent/20 hover:border-accent/50 transition-colors relative overflow-hidden group">
                 <div className="absolute left-0 top-0 bottom-0 w-1 bg-accent group-hover:w-1.5 transition-all" />
                 <div className="flex justify-between items-start mb-2 pl-2">
@@ -697,7 +838,13 @@ export default function Dashboard() {
                   <div className="w-16 h-10 bg-white/5 rounded border border-white/10 flex items-center justify-center">
                     <Camera className="w-4 h-4 text-muted" />
                   </div>
-                  <button className="text-xs text-primary hover:underline ml-auto">View Snippet</button>
+                  <button 
+                    onClick={() => alert.snapshot_url && setSelectedSnapshot(alert.snapshot_url)} 
+                    className={`text-xs text-primary hover:underline ml-auto ${!alert.snapshot_url ? 'opacity-30 cursor-not-allowed' : ''}`}
+                    disabled={!alert.snapshot_url}
+                  >
+                    View Snippet
+                  </button>
                 </div>
               </div>
             ))}
@@ -734,6 +881,39 @@ export default function Dashboard() {
         </div>
       </div>
       
+      {/* Snapshot Preview Modal */}
+      {selectedSnapshot && (
+        <div 
+          className="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center z-50 p-4 animate-fadeIn"
+          onClick={() => setSelectedSnapshot(null)}
+        >
+          <div 
+            className="glass-panel p-6 max-w-xl w-full border border-white/15 relative"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-sm font-semibold text-white">Alert Snapshot Preview</h3>
+              <button 
+                onClick={() => setSelectedSnapshot(null)}
+                className="text-xs text-muted hover:text-white"
+              >
+                Close
+              </button>
+            </div>
+            <div className="aspect-video w-full bg-black rounded-lg overflow-hidden border border-white/5 relative flex items-center justify-center">
+              <img 
+                src={`http://localhost:8000${selectedSnapshot}?token=${authToken}`} 
+                alt="Alert Snapshot" 
+                className="w-full h-full object-contain"
+                onError={(e) => {
+                  (e.target as HTMLImageElement).src = "";
+                  alert("Failed to load snapshot. Ensure backend is running and Staff Auth Token is correct.");
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

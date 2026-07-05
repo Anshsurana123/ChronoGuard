@@ -2,17 +2,36 @@ import asyncio
 import base64
 import cv2
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query, status, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import FileResponse
 import os
 import sys
 import json
 import numpy as np
+import time
 
 # Append current directory to path so we can import from local modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-import time
+# Security dependency for school staff verification
+security = HTTPBearer(auto_error=False)
+STAFF_TOKEN = "ChronoGuardStaffToken2026"
+
+def verify_staff_access(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    token: str = Query(None)
+):
+    if credentials and credentials.credentials == STAFF_TOKEN:
+        return "staff"
+    if token == STAFF_TOKEN:
+        return "staff"
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Unauthorized: School staff role required"
+    )
+
 from tracker.privacy_filter import PrivacyFilter
 from tracker.yolo_tracker import YoloTracker
 from engine.temporal_engine import TemporalEngine
@@ -55,7 +74,104 @@ except Exception as e:
 
 temporal_engine = TemporalEngine(time_hop_interval=15)
 geofence_engine = Geofence()
-alert_system = AlertSystem()
+# Absolute path to snapshot directory
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static_snapshots")
+os.makedirs(STATIC_DIR, exist_ok=True)
+alert_system = AlertSystem(static_dir=STATIC_DIR)
+
+from engine.db import update_camera_blur, get_setting, set_setting
+
+# Retention Purge Logic
+def purge_old_alerts():
+    try:
+        retention_days = int(get_setting("retention_days", "30"))
+        cutoff_time = time.time() - (retention_days * 24 * 3600)
+        print(f"[PurgeJob] Checking retention: {retention_days} days. Cutoff: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(cutoff_time))}")
+        
+        log_file = "alerts.json"
+        if os.path.exists(log_file):
+            try:
+                with open(log_file, "r") as f:
+                    logs = json.load(f)
+            except Exception:
+                logs = []
+                
+            active_logs = []
+            purged_count = 0
+            
+            for log in logs:
+                log_time = log.get("id")
+                if log_time and log_time < cutoff_time:
+                    # Older than cutoff: delete snapshot file
+                    snapshot_url = log.get("snapshot_url", "")
+                    if snapshot_url:
+                        # Extract filename from URL (e.g. /static/alert_...jpg)
+                        filename = snapshot_url.split("/")[-1].split("?")[0]
+                        file_path = os.path.join(STATIC_DIR, filename)
+                        if os.path.exists(file_path):
+                            try:
+                                os.remove(file_path)
+                                print(f"[PurgeJob] Deleted expired snapshot: {file_path}")
+                            except Exception as e:
+                                print(f"[PurgeJob] Failed to delete file {file_path}: {e}")
+                    purged_count += 1
+                else:
+                    active_logs.append(log)
+                    
+            if purged_count > 0:
+                with open(log_file, "w") as f:
+                    json.dump(active_logs, f, indent=4)
+                print(f"[PurgeJob] Purged {purged_count} expired alerts from logs.")
+    except Exception as e:
+        print(f"[PurgeJob] Error running purge: {e}")
+
+# Scheduled background task for purge
+async def scheduled_purge_loop():
+    while True:
+        purge_old_alerts()
+        # Sleep for 1 hour
+        await asyncio.sleep(3600)
+
+@app.on_event("startup")
+async def startup_event():
+    # Start the background purge task on startup
+    asyncio.create_task(scheduled_purge_loop())
+    print("[Backend] Scheduled retention purge background job started.")
+
+# Secure static files serving route
+@app.get("/static/{snapshot}")
+async def get_snapshot(snapshot: str, staff = Depends(verify_staff_access)):
+    snapshot_path = os.path.join(STATIC_DIR, snapshot)
+    if not os.path.exists(snapshot_path):
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return FileResponse(snapshot_path)
+
+# API Endpoints
+@app.get("/api/cameras")
+async def get_cameras_api(staff = Depends(verify_staff_access)):
+    return get_all_cameras()
+
+@app.post("/api/cameras/{camera_id}/blur")
+async def toggle_camera_blur(camera_id: str, enabled: bool, staff = Depends(verify_staff_access)):
+    cam = get_camera(camera_id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    update_camera_blur(camera_id, enabled)
+    return {"camera_id": camera_id, "face_blur_enabled": enabled}
+
+@app.get("/api/settings/retention")
+async def get_retention_days(staff = Depends(verify_staff_access)):
+    days = get_setting("retention_days", "30")
+    return {"retention_days": int(days)}
+
+@app.post("/api/settings/retention")
+async def set_retention_days(days: int, staff = Depends(verify_staff_access)):
+    if days <= 0:
+        raise HTTPException(status_code=400, detail="Retention days must be positive")
+    set_setting("retention_days", str(days))
+    # Run purge immediately
+    purge_old_alerts()
+    return {"retention_days": days}
 
 # Shared state
 current_frame = None
@@ -201,8 +317,12 @@ async def websocket_video_endpoint(websocket: WebSocket, camera_id: str = "camer
             frame_counter += 1
             current_frame = frame.copy()
 
+            # Read camera configuration from DB per frame
+            cam_config = get_camera(camera_id)
+            face_blur_enabled = cam_config.get("face_blur_enabled", 0) == 1 if cam_config else False
+
             # 1. Zero-Trust Privacy Filter
-            frame = privacy_filter.apply(frame)
+            frame = privacy_filter.apply(frame, enabled=face_blur_enabled)
 
             # 2. Local YOLO-World Tracking Update
             if tracking_active and tracker_ready and yolo_tracker is not None and frame_counter % SAM_UPDATE_INTERVAL == 0:

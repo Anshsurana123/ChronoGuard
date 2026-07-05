@@ -31,6 +31,8 @@ Thumbs.db
 *.key
 secrets.json
 config.json
+*.db
+chronoguard.db
 
 # Model weights
 *.pt
