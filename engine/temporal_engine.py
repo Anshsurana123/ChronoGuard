@@ -35,21 +35,29 @@ class TemporalEngine:
         # In normal mode, process every frame (or could limit to e.g. 15 FPS)
         return True
 
-    def evaluate_tracking_state(self, mask, confidence):
+    def evaluate_tracking_state(self, is_tracked, confidence):
         """
-        Evaluates the result from SAM 3. 
-        If confidence drops unexpectedly during Time-Hopping, trigger backtracking.
+        Evaluates the tracking state.
+        If object is lost (not tracked), confidence drops below threshold, or an anomaly is flagged,
+        return an anomaly status.
         """
-        if mask is None or confidence < self.confidence_threshold:
-            if self.forensic_mode and not self.is_backtracking:
-                print("ANOMALY DETECTED: Object lost or confidence low. Triggering Backtracking...")
-                self.is_backtracking = True
-                # In a real implementation, we would seek the video buffer backwards here.
-                return "backtrack_triggered"
+        is_anomaly = (not is_tracked) or (confidence < self.confidence_threshold)
+        
+        if is_anomaly:
+            if self.forensic_mode:
+                if not self.is_backtracking:
+                    print("ANOMALY DETECTED: Object lost or confidence low. Triggering Backtracking...")
+                    self.is_backtracking = True
+                    return "backtrack_triggered"
+                return "backtracking"
+            else:
+                print("ANOMALY DETECTED in live mode: tracking lost or low confidence.")
+                return "anomaly_detected"
         else:
             # Successfully tracked, disable backtracking if it was on
             if self.is_backtracking:
                 print("BACKTRACKING COMPLETE: Object re-acquired.")
                 self.is_backtracking = False
+                return "backtrack_complete"
                 
         return "nominal"

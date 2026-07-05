@@ -12,8 +12,9 @@ import numpy as np
 # Append current directory to path so we can import from local modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+import time
 from tracker.privacy_filter import PrivacyFilter
-from tracker.sam_client import SamClient
+from tracker.yolo_tracker import YoloTracker
 from engine.temporal_engine import TemporalEngine
 from engine.geofence import Geofence
 from engine.alerts import AlertSystem
@@ -31,11 +32,15 @@ app.add_middleware(
 # Initialize engines
 privacy_filter = PrivacyFilter()
 
-# ------------------------------------------------------------------
-# Set your Colab ngrok URL here (or via SAM_ENDPOINT env var)
-# ------------------------------------------------------------------
-SAM_ENDPOINT = os.environ.get("SAM_ENDPOINT", "https://b2d9-34-6-88-71.ngrok-free.app")
-sam_client = SamClient(endpoint_url=SAM_ENDPOINT)
+# Local YOLO-World + ByteTrack Tracker
+tracker_ready = False
+try:
+    yolo_tracker = YoloTracker()
+    tracker_ready = True
+    print("[Backend] Local YOLO-World tracker initialized successfully.")
+except Exception as e:
+    print(f"\n[Backend] CRITICAL ERROR: Failed to initialize local YOLO-World tracker: {e}\n")
+    yolo_tracker = None
 
 temporal_engine = TemporalEngine(time_hop_interval=15)
 geofence_engine = Geofence()
@@ -45,20 +50,18 @@ alert_system = AlertSystem()
 current_frame = None
 tracking_active = False
 tracking_target = (320, 240)       # Initial click point
-tracking_bbox = None               # [x, y, w, h] from SAM 3
-tracking_centroid = None            # [cx, cy]  from SAM 3
+tracking_bbox = None               # [x, y, w, h]
+tracking_centroid = None            # [cx, cy]
 tracking_confidence = 0.0
-sam_connected = False               # Whether the Colab endpoint is reachable
 
 @app.get("/")
 async def root():
-    return {"status": "ChronoGuard Local Backend Active", "sam_endpoint": SAM_ENDPOINT}
+    return {"status": "ChronoGuard Local Backend Active", "tracker": "YOLO-World + ByteTrack", "tracker_ready": tracker_ready}
 
 @app.websocket("/ws/video")
 async def websocket_video_endpoint(websocket: WebSocket):
     global current_frame, tracking_active
     global tracking_target, tracking_bbox, tracking_centroid, tracking_confidence
-    global sam_connected
 
     await websocket.accept()
     cap = cv2.VideoCapture(0)
@@ -70,7 +73,6 @@ async def websocket_video_endpoint(websocket: WebSocket):
     async def receive_messages():
         global tracking_active, tracking_target
         global tracking_bbox, tracking_centroid, tracking_confidence
-        global sam_connected
         try:
             while True:
                 data = await websocket.receive_text()
@@ -79,23 +81,41 @@ async def websocket_video_endpoint(websocket: WebSocket):
                 if msg.get("type") == "init_tracking":
                     print("[Backend] Received init_tracking:", msg)
                     click_x, click_y = msg["x"], msg["y"]
+                    prompt = msg.get("prompt", "person")
                     tracking_target = (click_x, click_y)
                     tracking_bbox = None
                     tracking_centroid = None
                     tracking_confidence = 0.0
 
+                    if not tracker_ready or yolo_tracker is None:
+                        print("[Backend] YOLO Tracker is offline / failed to load. Aborting.")
+                        await websocket.send_json({
+                            "type": "alert",
+                            "data": {
+                                "id": int(time.time()),
+                                "time": time.strftime("%H:%M:%S"),
+                                "type": "CRITICAL ERROR: Local YOLO Tracker not loaded!",
+                            }
+                        })
+                        await websocket.send_json({
+                            "type": "tracking_update",
+                            "bbox": None,
+                            "centroid": [click_x, click_y],
+                            "confidence": 0.0,
+                        })
+                        continue
+
                     if current_frame is not None:
-                        # Call Colab SAM 3 endpoint
-                        result = await sam_client.init_tracking(current_frame, click_x, click_y)
+                        result = await asyncio.to_thread(
+                            yolo_tracker.init_tracking, current_frame, click_x, click_y, prompt
+                        )
                         if result and result.get("bbox"):
                             tracking_active = True
                             tracking_bbox = result["bbox"]
                             tracking_centroid = result["centroid"]
-                            tracking_confidence = result.get("confidence", 0)
-                            sam_connected = True
-                            print(f"[Backend] SAM 3 tracking initialized — bbox={tracking_bbox}, conf={tracking_confidence:.2f}")
+                            tracking_confidence = result.get("confidence", 0.0)
+                            print(f"[Backend] YOLO tracking initialized — bbox={tracking_bbox}, conf={tracking_confidence:.2f}")
 
-                            # Send initial tracking data to frontend
                             await websocket.send_json({
                                 "type": "tracking_update",
                                 "bbox": tracking_bbox,
@@ -103,17 +123,20 @@ async def websocket_video_endpoint(websocket: WebSocket):
                                 "confidence": tracking_confidence,
                             })
                         else:
-                            # SAM endpoint unreachable — fall back to click-point only
-                            tracking_active = True
-                            tracking_centroid = [click_x, click_y]
-                            sam_connected = False
-                            print("[Backend] SAM 3 unreachable, tracking at click point only")
-
+                            print("[Backend] YOLO tracker failed to find target object at click point.")
+                            await websocket.send_json({
+                                "type": "alert",
+                                "data": {
+                                    "id": int(time.time()),
+                                    "time": time.strftime("%H:%M:%S"),
+                                    "type": f"Tracker Warning: No '{prompt}' detected near click point.",
+                                }
+                            })
                             await websocket.send_json({
                                 "type": "tracking_update",
                                 "bbox": None,
                                 "centroid": [click_x, click_y],
-                                "confidence": 0,
+                                "confidence": 0.0,
                             })
 
                 elif msg.get("type") == "set_geofence":
@@ -121,15 +144,12 @@ async def websocket_video_endpoint(websocket: WebSocket):
                     geofence_engine.set_polygon(msg["points"])
 
                 elif msg.get("type") == "update_endpoint":
-                    new_url = msg.get("endpoint_url", "").rstrip("/")
-                    if new_url:
-                        print(f"[Backend] Dynamic endpoint update request received: {new_url}")
-                        await sam_client.update_endpoint(new_url)
-                        sam_connected = False
-                        await websocket.send_json({
-                            "type": "endpoint_updated",
-                            "endpoint_url": new_url,
-                        })
+                    # Colab tunnel updating is obsolete now that we run locally
+                    print("[Backend] Dynamic endpoint update received (obsolete/local mode active).")
+                    await websocket.send_json({
+                        "type": "endpoint_updated",
+                        "endpoint_url": "LOCAL (YOLO-World)",
+                    })
 
                 elif msg.get("type") == "stop_analysis":
                     tracking_active = False
@@ -137,8 +157,9 @@ async def websocket_video_endpoint(websocket: WebSocket):
                     tracking_centroid = None
                     tracking_confidence = 0.0
                     geofence_engine.set_polygon([])
-                    await sam_client.reset()
-                    print("[Backend] Analysis stopped, SAM session reset")
+                    if yolo_tracker:
+                        yolo_tracker.reset()
+                    print("[Backend] Analysis stopped, tracker reset")
 
         except WebSocketDisconnect:
             print("[Backend] Receiver disconnected")
@@ -148,8 +169,8 @@ async def websocket_video_endpoint(websocket: WebSocket):
     last_breach_alert_time = 0
     BREACH_THROTTLE_SECS = 5
     frame_counter = 0
-    # Only send frames to SAM every N video frames to avoid overloading
-    SAM_UPDATE_INTERVAL = 3  # process every 3rd frame (~10 fps at 30fps capture)
+    # Process every 3rd frame (~10 fps at 30fps capture) to balance CPU load
+    SAM_UPDATE_INTERVAL = 3
 
     try:
         while True:
@@ -159,20 +180,21 @@ async def websocket_video_endpoint(websocket: WebSocket):
                 continue
 
             frame_counter += 1
-
-            # Save raw frame for SAM init on click
             current_frame = frame.copy()
 
             # 1. Zero-Trust Privacy Filter
             frame = privacy_filter.apply(frame)
 
-            # 2. SAM 3 Tracking — send frame to Colab for mask update
-            if tracking_active and sam_connected and frame_counter % SAM_UPDATE_INTERVAL == 0:
-                result = await sam_client.update_tracking(current_frame)
-                if result and result.get("bbox"):
+            # 2. Local YOLO-World Tracking Update
+            if tracking_active and tracker_ready and yolo_tracker is not None and frame_counter % SAM_UPDATE_INTERVAL == 0:
+                result = await asyncio.to_thread(yolo_tracker.update_tracking, current_frame)
+                is_tracked = False
+                
+                if result is not None:
                     tracking_bbox = result["bbox"]
                     tracking_centroid = result["centroid"]
-                    tracking_confidence = result.get("confidence", 0)
+                    tracking_confidence = result["confidence"]
+                    is_tracked = result.get("is_valid", True)
 
                     # Push updated tracking data to frontend
                     try:
@@ -184,23 +206,41 @@ async def websocket_video_endpoint(websocket: WebSocket):
                         })
                     except Exception:
                         pass
+                else:
+                    # Target lost completely (exceeded grace window)
+                    tracking_active = False
+                    tracking_bbox = None
+                    tracking_centroid = None
+                    tracking_confidence = 0.0
+                    is_tracked = False
 
-                    # Temporal engine: evaluate tracking quality
-                    state = temporal_engine.evaluate_tracking_state(
-                        True, tracking_confidence
-                    )
-                    if state == "backtrack_triggered":
-                        try:
-                            await websocket.send_json({
-                                "type": "alert",
-                                "data": {
-                                    "id": int(asyncio.get_event_loop().time()),
-                                    "time": __import__("time").strftime("%H:%M:%S"),
-                                    "type": "Tracking Anomaly — Backtracking",
-                                }
-                            })
-                        except Exception:
-                            pass
+                    try:
+                        await websocket.send_json({
+                            "type": "tracking_update",
+                            "bbox": None,
+                            "centroid": None,
+                            "confidence": 0.0,
+                        })
+                    except Exception:
+                        pass
+
+                # Temporal engine: evaluate tracking quality
+                state = temporal_engine.evaluate_tracking_state(
+                    is_tracked, tracking_confidence
+                )
+                if state in ("backtrack_triggered", "anomaly_detected"):
+                    alert_type = "Tracking Anomaly — Backtracking" if state == "backtrack_triggered" else "Tracking Anomaly (Low Confidence/Lost)"
+                    try:
+                        await websocket.send_json({
+                            "type": "alert",
+                            "data": {
+                                "id": int(time.time()),
+                                "time": time.strftime("%H:%M:%S"),
+                                "type": alert_type,
+                            }
+                        })
+                    except Exception:
+                        pass
 
             # 3. Boundary & Geofence Breach Detection
             if tracking_active and tracking_centroid:
@@ -251,7 +291,6 @@ async def websocket_video_endpoint(websocket: WebSocket):
     finally:
         recv_task.cancel()
         cap.release()
-        await sam_client.close()
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

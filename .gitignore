@@ -31,3 +31,11 @@ Thumbs.db
 *.key
 secrets.json
 config.json
+
+# Model weights
+*.pt
+*.onnx
+*_openvino_model/
+
+# Prompt brief
+ChronoGuard_Fix_Prompt.md
