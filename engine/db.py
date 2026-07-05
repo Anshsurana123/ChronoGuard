@@ -31,6 +31,16 @@ def init_db():
         )
     """)
     
+    # Create alerts table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY,
+            time TEXT NOT NULL,
+            type TEXT NOT NULL,
+            snapshot_url TEXT NOT NULL
+        )
+    """)
+    
     # Seed default camera if table is empty
     cursor.execute("SELECT COUNT(*) FROM cameras")
     if cursor.fetchone()[0] == 0:
@@ -51,6 +61,39 @@ def init_db():
         
     conn.commit()
     conn.close()
+
+def insert_alert(alert_id: int, time_str: str, alert_type: str, snapshot_url: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO alerts (id, time, type, snapshot_url) VALUES (?, ?, ?, ?)",
+        (alert_id, time_str, alert_type, snapshot_url)
+    )
+    conn.commit()
+    conn.close()
+
+def get_all_alerts() -> list[dict]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM alerts ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def delete_alerts_older_than(cutoff_time: int) -> list[dict]:
+    """Deletes expired alerts and returns the deleted alert records (to clean up files)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Fetch records to be deleted first
+    cursor.execute("SELECT * FROM alerts WHERE id < ?", (cutoff_time,))
+    expired_rows = [dict(row) for row in cursor.fetchall()]
+    
+    # Delete them
+    cursor.execute("DELETE FROM alerts WHERE id < ?", (cutoff_time,))
+    conn.commit()
+    conn.close()
+    return expired_rows
 
 def get_camera(camera_id: str) -> dict | None:
     conn = get_db_connection()

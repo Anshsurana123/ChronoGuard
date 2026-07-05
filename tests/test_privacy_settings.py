@@ -85,9 +85,6 @@ class TestPrivacySettings(unittest.TestCase):
             self.assertEqual(mock_blur.call_args[0][0].shape, (40, 30, 3))
 
     def test_retention_purge_job(self):
-        # Create a mock alert log
-        log_file = "alerts.json"
-        
         # Alert 0: 31 days old (expired if retention is 30 days)
         old_alert_id = int(time.time() - (31 * 24 * 3600))
         # Alert 1: 5 days old (not expired)
@@ -104,23 +101,10 @@ class TestPrivacySettings(unittest.TestCase):
         with open(new_path, "w") as f:
             f.write("fake_image_data")
             
-        mock_logs = [
-            {
-                "id": old_alert_id,
-                "time": "12:00:00",
-                "type": "Expired Alert",
-                "snapshot_url": f"/static/{old_snapshot}"
-            },
-            {
-                "id": new_alert_id,
-                "time": "12:05:00",
-                "type": "Active Alert",
-                "snapshot_url": f"/static/{new_snapshot}"
-            }
-        ]
-        
-        with open(log_file, "w") as f:
-            json.dump(mock_logs, f, indent=4)
+        # Seed database alerts
+        from engine.db import insert_alert, get_all_alerts
+        insert_alert(old_alert_id, "12:00:00", "Expired Alert", f"/static/{old_snapshot}")
+        insert_alert(new_alert_id, "12:05:00", "Active Alert", f"/static/{new_snapshot}")
             
         # Set retention days to 30
         set_setting("retention_days", "30")
@@ -132,18 +116,15 @@ class TestPrivacySettings(unittest.TestCase):
         self.assertFalse(os.path.exists(old_path))
         self.assertTrue(os.path.exists(new_path))
         
-        # Verify log file has purged expired alert
-        with open(log_file, "r") as f:
-            active_logs = json.load(f)
-            
-        self.assertEqual(len(active_logs), 1)
-        self.assertEqual(active_logs[0]["id"], new_alert_id)
+        # Verify DB has purged expired alert
+        active_alerts = get_all_alerts()
+        active_ids = [a["id"] for a in active_alerts]
+        self.assertIn(new_alert_id, active_ids)
+        self.assertNotIn(old_alert_id, active_ids)
         
         # Clean up
         if os.path.exists(new_path):
             os.remove(new_path)
-        if os.path.exists(log_file):
-            os.remove(log_file)
 
 if __name__ == "__main__":
     unittest.main()

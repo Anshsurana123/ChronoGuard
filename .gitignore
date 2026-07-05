@@ -33,6 +33,7 @@ secrets.json
 config.json
 *.db
 chronoguard.db
+alerts.json
 
 # Model weights
 *.pt

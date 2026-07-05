@@ -96,6 +96,20 @@ export default function Dashboard() {
         }
       })
       .catch(err => {});
+
+      fetch("http://localhost:8000/api/alerts", {
+        headers: { "Authorization": `Bearer ${authToken}` }
+      })
+      .then(res => {
+        if (!res.ok) throw new Error("Unauthorized");
+        return res.json();
+      })
+      .then(data => {
+        if (Array.isArray(data)) {
+          setAlerts(data);
+        }
+      })
+      .catch(err => {});
     };
 
     const loadTelemetry = () => {
@@ -537,10 +551,7 @@ export default function Dashboard() {
     };
   }, [isStreaming, ngrokUrl, selectedCamera]);
 
-  const [alerts, setAlerts] = useState<{ id: number; time: string; type: string }[]>([
-    { id: 1, time: "10:42:05", type: "Geofence Breach" },
-    { id: 2, time: "10:38:12", type: "Object Missing" },
-  ]);
+  const [alerts, setAlerts] = useState<{ id: number; time: string; type: string; snapshot_url?: string }[]>([]);
 
   return (
     <div className="min-h-screen p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 relative overflow-hidden">

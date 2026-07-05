@@ -2,23 +2,18 @@ import cv2
 import time
 import os
 import json
+from engine.db import insert_alert
 
 class AlertSystem:
-    def __init__(self, static_dir="../dashboard/public/static", log_file="alerts.json"):
+    def __init__(self, static_dir="static_snapshots"):
         self.static_dir = static_dir
-        self.log_file = log_file
         
         # Ensure directories exist
         os.makedirs(self.static_dir, exist_ok=True)
-        
-        # Initialize log file if it doesn't exist
-        if not os.path.exists(self.log_file):
-            with open(self.log_file, "w") as f:
-                json.dump([], f)
 
     def log_alert(self, alert_type, frame):
         """
-        Saves a snapshot of the frame and logs the alert to JSON.
+        Saves a snapshot of the frame and logs the alert to the SQLite database.
         """
         timestamp = time.strftime("%H:%M:%S")
         timestamp_fs = time.strftime("%H_%M_%S") # File system safe
@@ -29,24 +24,20 @@ class AlertSystem:
         cv2.imwrite(snapshot_path, frame)
         
         # Create alert record
+        alert_id = int(time.time())
+        snapshot_url = f"/static/{snapshot_filename}"
         alert_record = {
-            "id": int(time.time()),
+            "id": alert_id,
             "time": timestamp,
             "type": alert_type,
-            "snapshot_url": f"/static/{snapshot_filename}"
+            "snapshot_url": snapshot_url
         }
         
-        # Append to log
+        # Insert into SQLite Database
         try:
-            with open(self.log_file, "r") as f:
-                logs = json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            logs = []
+            insert_alert(alert_id, timestamp, alert_type, snapshot_url)
+            print(f"[{timestamp}] ALERT SAVED TO DB: {alert_type}")
+        except Exception as e:
+            print(f"[{timestamp}] ERROR: Failed to save alert to DB: {e}")
             
-        logs.append(alert_record)
-        
-        with open(self.log_file, "w") as f:
-            json.dump(logs, f, indent=4)
-            
-        print(f"[{timestamp}] ALERT LOGGED: {alert_type}")
         return alert_record

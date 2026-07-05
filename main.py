@@ -79,49 +79,32 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static_sn
 os.makedirs(STATIC_DIR, exist_ok=True)
 alert_system = AlertSystem(static_dir=STATIC_DIR)
 
-from engine.db import update_camera_blur, get_setting, set_setting
+from engine.db import update_camera_blur, get_setting, set_setting, delete_alerts_older_than, get_all_alerts
 
 # Retention Purge Logic
 def purge_old_alerts():
     try:
         retention_days = int(get_setting("retention_days", "30"))
-        cutoff_time = time.time() - (retention_days * 24 * 3600)
+        cutoff_time = int(time.time() - (retention_days * 24 * 3600))
         print(f"[PurgeJob] Checking retention: {retention_days} days. Cutoff: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(cutoff_time))}")
         
-        log_file = "alerts.json"
-        if os.path.exists(log_file):
-            try:
-                with open(log_file, "r") as f:
-                    logs = json.load(f)
-            except Exception:
-                logs = []
-                
-            active_logs = []
-            purged_count = 0
+        expired_alerts = delete_alerts_older_than(cutoff_time)
+        purged_count = 0
+        for alert in expired_alerts:
+            snapshot_url = alert.get("snapshot_url", "")
+            if snapshot_url:
+                filename = snapshot_url.split("/")[-1].split("?")[0]
+                file_path = os.path.join(STATIC_DIR, filename)
+                if os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                        print(f"[PurgeJob] Deleted expired snapshot file: {file_path}")
+                    except Exception as e:
+                        print(f"[PurgeJob] Failed to delete file {file_path}: {e}")
+            purged_count += 1
             
-            for log in logs:
-                log_time = log.get("id")
-                if log_time and log_time < cutoff_time:
-                    # Older than cutoff: delete snapshot file
-                    snapshot_url = log.get("snapshot_url", "")
-                    if snapshot_url:
-                        # Extract filename from URL (e.g. /static/alert_...jpg)
-                        filename = snapshot_url.split("/")[-1].split("?")[0]
-                        file_path = os.path.join(STATIC_DIR, filename)
-                        if os.path.exists(file_path):
-                            try:
-                                os.remove(file_path)
-                                print(f"[PurgeJob] Deleted expired snapshot: {file_path}")
-                            except Exception as e:
-                                print(f"[PurgeJob] Failed to delete file {file_path}: {e}")
-                    purged_count += 1
-                else:
-                    active_logs.append(log)
-                    
-            if purged_count > 0:
-                with open(log_file, "w") as f:
-                    json.dump(active_logs, f, indent=4)
-                print(f"[PurgeJob] Purged {purged_count} expired alerts from logs.")
+        if purged_count > 0:
+            print(f"[PurgeJob] Purged {purged_count} expired alerts from database.")
     except Exception as e:
         print(f"[PurgeJob] Error running purge: {e}")
 
@@ -172,6 +155,26 @@ async def set_retention_days(days: int, staff = Depends(verify_staff_access)):
     # Run purge immediately
     purge_old_alerts()
     return {"retention_days": days}
+
+@app.get("/api/settings/telemetry")
+async def get_telemetry_api(staff = Depends(verify_staff_access)):
+    if yolo_tracker is not None:
+        return {
+            "device": yolo_tracker.device,
+            "model_scale": yolo_tracker.model_scale,
+            "tracker_ready": tracker_ready,
+            "cameras_registered": len(camera_manager.streams)
+        }
+    return {
+        "device": "N/A",
+        "model_scale": "N/A",
+        "tracker_ready": False,
+        "cameras_registered": 0
+    }
+
+@app.get("/api/alerts")
+async def get_alerts_api(staff = Depends(verify_staff_access)):
+    return get_all_alerts()
 
 # Shared state
 current_frame = None
