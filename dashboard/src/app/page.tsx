@@ -27,6 +27,8 @@ export default function Dashboard() {
   const [authToken, setAuthToken] = useState("ChronoGuardStaffToken2026");
   const [retentionDays, setRetentionDays] = useState(30);
   const [selectedSnapshot, setSelectedSnapshot] = useState<string | null>(null);
+  const [wsLatency, setWsLatency] = useState<number>(0);
+  const [telemetry, setTelemetry] = useState<{ device: string; modelScale: string; trackerReady: boolean; camerasRegistered: number } | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -59,39 +61,71 @@ export default function Dashboard() {
       setTimeout(() => setUrlAppliedSuccess(false), 2000);
     }
   }, [ngrokUrl]);
-  // Load settings on startup / camera selection / token change
+  // Load settings and fetch periodic telemetry
   useEffect(() => {
     if (!authToken) return;
-    fetch("http://localhost:8000/api/cameras", {
-      headers: { "Authorization": `Bearer ${authToken}` }
-    })
-    .then(res => {
-      if (!res.ok) throw new Error("Unauthorized");
-      return res.json();
-    })
-    .then(data => {
-      if (Array.isArray(data)) {
-        const currentCam = data.find((c: any) => c.id === selectedCamera);
-        if (currentCam) {
-          setFaceBlurEnabled(currentCam.face_blur_enabled === 1);
+    
+    const loadSettings = () => {
+      fetch("http://localhost:8000/api/cameras", {
+        headers: { "Authorization": `Bearer ${authToken}` }
+      })
+      .then(res => {
+        if (!res.ok) throw new Error("Unauthorized");
+        return res.json();
+      })
+      .then(data => {
+        if (Array.isArray(data)) {
+          const currentCam = data.find((c: any) => c.id === selectedCamera);
+          if (currentCam) {
+            setFaceBlurEnabled(currentCam.face_blur_enabled === 1);
+          }
         }
-      }
-    })
-    .catch(err => console.log("Waiting for backend API or invalid token"));
+      })
+      .catch(err => console.log("Waiting for backend API or invalid token"));
 
-    fetch("http://localhost:8000/api/settings/retention", {
-      headers: { "Authorization": `Bearer ${authToken}` }
-    })
-    .then(res => {
-      if (!res.ok) throw new Error("Unauthorized");
-      return res.json();
-    })
-    .then(data => {
-      if (data && data.retention_days) {
-        setRetentionDays(data.retention_days);
-      }
-    })
-    .catch(err => {});
+      fetch("http://localhost:8000/api/settings/retention", {
+        headers: { "Authorization": `Bearer ${authToken}` }
+      })
+      .then(res => {
+        if (!res.ok) throw new Error("Unauthorized");
+        return res.json();
+      })
+      .then(data => {
+        if (data && data.retention_days) {
+          setRetentionDays(data.retention_days);
+        }
+      })
+      .catch(err => {});
+    };
+
+    const loadTelemetry = () => {
+      fetch("http://localhost:8000/api/settings/telemetry", {
+        headers: { "Authorization": `Bearer ${authToken}` }
+      })
+      .then(res => {
+        if (!res.ok) throw new Error("Unauthorized");
+        return res.json();
+      })
+      .then(data => {
+        if (data) {
+          setTelemetry({
+            device: data.device,
+            modelScale: data.model_scale,
+            trackerReady: data.tracker_ready,
+            camerasRegistered: data.cameras_registered
+          });
+          setSamConnected(data.tracker_ready);
+        }
+      })
+      .catch(err => {});
+    };
+
+    loadSettings();
+    loadTelemetry();
+
+    // Poll telemetry every 5 seconds
+    const interval = setInterval(loadTelemetry, 5000);
+    return () => clearInterval(interval);
   }, [selectedCamera, authToken]);
 
   const toggleFaceBlur = async () => {
@@ -462,6 +496,11 @@ export default function Dashboard() {
         const data = JSON.parse(event.data);
         if (data.type === "frame") {
           setFrameData(data.data);
+          if (data.timestamp) {
+            const currentLatency = Math.round(Date.now() - data.timestamp * 1000);
+            // Cap at 0 to avoid minor system clock drift differences
+            setWsLatency(Math.max(0, currentLatency));
+          }
         } else if (data.type === "tracking_update") {
           // Real-time tracking data from SAM 2 via backend
           if (data.bbox) {
@@ -527,8 +566,8 @@ export default function Dashboard() {
             </div>
 
             <div className="flex items-center justify-between p-3 rounded-lg bg-black/40 border border-border">
-              <span className="flex items-center gap-2 text-sm"><div className={`w-2 h-2 rounded-full ${samConnected ? 'bg-green-500 animate-pulse' : isStreaming ? 'bg-yellow-500' : 'bg-red-500'}`} /> SAM 3 Predictor</span>
-              <span className="text-xs font-mono text-muted">{samConnected ? 'TRACKING' : trackingPoint ? 'OFFLINE' : 'IDLE'}</span>
+              <span className="flex items-center gap-2 text-sm"><div className={`w-2 h-2 rounded-full ${samConnected ? 'bg-green-500 animate-pulse' : isStreaming ? 'bg-yellow-500' : 'bg-red-500'}`} /> YOLOE Tracker</span>
+              <span className="text-xs font-mono text-muted">{samConnected ? 'TRACKING' : trackingPoint ? 'ACQUIRING' : 'IDLE'}</span>
             </div>
           </div>
 
@@ -536,42 +575,29 @@ export default function Dashboard() {
 
           <div className="space-y-3">
             <h2 className="text-xs uppercase tracking-widest text-muted font-semibold flex items-center justify-between">
-              <span>SAM 3 Colab Bridge</span>
-              <Link2 className="w-3.5 h-3.5 text-primary animate-pulse" />
+              <span>Local AI Ingestion</span>
+              <Shield className="w-3.5 h-3.5 text-primary" />
             </h2>
-            <p className="text-[10.5px] text-muted leading-relaxed">
-              Route vision tasks to your hosted SAM 3 engine. Paste the public ngrok endpoint URL from Colab:
-            </p>
-            <div className="relative group">
-              <input
-                type="text"
-                value={ngrokUrl}
-                onChange={(e) => setNgrokUrl(e.target.value)}
-                placeholder="https://your-tunnel.ngrok-free.app"
-                className="w-full bg-black/55 border border-white/10 rounded-lg p-2.5 pl-3 pr-20 text-[11px] font-mono text-white placeholder-white/20 transition-all duration-300 focus:outline-none focus:border-primary/80 focus:ring-1 focus:ring-primary/20"
-              />
-              <button
-                onClick={handleApplyNgrokUrl}
-                disabled={isApplyingUrl}
-                className="absolute right-1 top-1 bottom-1 px-3 text-[10px] font-medium bg-primary/10 text-primary border border-primary/25 rounded-md hover:bg-primary/20 active:scale-95 transition-all flex items-center gap-1 cursor-pointer disabled:opacity-50"
-              >
-                {urlAppliedSuccess ? (
-                  <>
-                    <Check className="w-3 h-3 text-green-400" />
-                    <span className="text-green-400">Linked</span>
-                  </>
-                ) : isApplyingUrl ? (
-                  <span>Syncing...</span>
-                ) : (
-                  <span>Apply</span>
-                )}
-              </button>
+            <div className="p-4 rounded-lg bg-primary/5 border border-primary/20 flex flex-col gap-1.5 animate-fadeIn">
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-muted">Inference Pipeline:</span>
+                <span className="font-semibold text-white">YOLOE + ByteTrack</span>
+              </div>
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-muted">Pipeline Status:</span>
+                <span className={`font-mono font-semibold ${telemetry?.trackerReady ? 'text-green-400' : 'text-red-400'}`}>
+                  {telemetry?.trackerReady ? 'ONLINE' : 'OFFLINE'}
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-muted">Model Scale:</span>
+                <span className="font-mono text-white">{telemetry?.modelScale.toUpperCase() || 'S'}</span>
+              </div>
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-muted">Execution Device:</span>
+                <span className="font-mono text-accent">{telemetry?.device.toUpperCase() || 'CPU'}</span>
+              </div>
             </div>
-            {urlAppliedSuccess && (
-              <p className="text-[10px] text-green-400 flex items-center gap-1 animate-fadeIn">
-                <Check className="w-2.5 h-2.5" /> Bridge synchronized!
-              </p>
-            )}
           </div>
         </div>
 
@@ -861,20 +887,20 @@ export default function Dashboard() {
           <div className="space-y-4">
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-muted">Network Latency</span>
-                <span className="font-mono text-primary">~12ms</span>
+                <span className="text-muted">WebSocket Latency</span>
+                <span className="font-mono text-primary">{wsLatency}ms</span>
               </div>
               <div className="w-full h-1 bg-black/50 rounded-full overflow-hidden">
-                <div className="w-1/4 h-full bg-primary" />
+                <div className="h-full bg-primary transition-all duration-300" style={{ width: `${Math.min(100, Math.max(5, wsLatency))}%` }} />
               </div>
             </div>
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-muted">Colab GPU VRAM</span>
-                <span className="font-mono text-accent">--%</span>
+                <span className="text-muted">AI Ingestion Device</span>
+                <span className="font-mono text-accent">{telemetry?.device.toUpperCase() || 'CPU'}</span>
               </div>
               <div className="w-full h-1 bg-black/50 rounded-full overflow-hidden">
-                <div className="w-0 h-full bg-accent" />
+                <div className="h-full bg-accent transition-all duration-300" style={{ width: telemetry?.device.toLowerCase().includes("cuda") ? "100%" : "20%" }} />
               </div>
             </div>
           </div>

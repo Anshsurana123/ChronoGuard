@@ -419,6 +419,7 @@ async def websocket_video_endpoint(websocket: WebSocket, camera_id: str = "camer
             await websocket.send_json({
                 "type": "frame",
                 "data": frame_b64,
+                "timestamp": time.time(),
             })
 
             await asyncio.sleep(0.033)
